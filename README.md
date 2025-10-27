@@ -4,7 +4,6 @@
   <img src="assets/navsim_transparent.png" width="600">
   <h2 align="center">Pseudo-Simulation for Autonomous Driving</h1>
   <h3 align="center"><a href="https://arxiv.org/abs/2506.04218">Paper</a> | <a href="https://vveicao.github.io/projects/NavsimV2/Cao2025_supp.pdf">Supplementary</a> | <a href="https://huggingface.co/spaces/AGC2025/e2e-driving-navhard"> Public Leaderboard v2 (navhard)</a> | <a href="https://huggingface.co/spaces/AGC2024-P/e2e-driving-navtest"> Public Leaderboard v1 (navtest)</a> </h3>
-  <h3 align="center"><a href="https://huggingface.co/spaces/AGC2025/e2e-driving-2025">Challenge Leaderboard v2 (ICCV)</a> | <a href="https://huggingface.co/spaces/AGC2025/e2e-driving-warmup-iccv">Warmup Leaderboard v2 (ICCV)</a> |  <a href="https://opendrivelab.com/challenge2025/#navsim-e2e-driving">Challenge Results (CVPR Phase)</a> </h3>
 </p>
 
 </div>
@@ -45,7 +44,7 @@ The main branch contains the code for NAVSIM v2, used in the 2025 NAVSIM challen
 
 🤔 **Motivation:** Current AV evaluation methods face critical trade-offs: closed-loop simulation is resource-intensive and requires model access rather than just model predictions, while open-loop evaluation overlooks important factors such as error recovery and behavior deviation from the expert path. An evaluation paradigm bridging the gap is required for large-scale, rapid validation.
 
-🏆 **Highlights:** Pseudo-simulation achieves a strong correlation with traditional, computationally expensive closed-loop simulations while requiring 6x less compute. Unlike traditional closed-loop simulation, pseudo-simulation is neither sequential nor interactive, enabling the open-loop computation of all evaluation metrics in our leaderboard. It will serve as the primary evaluation framework for the <a href="https://huggingface.co/spaces/AGC2025/e2e-driving-2025">AGC2025 NAVSIM End-to-End Driving Challenge</a>.
+🏆 **Highlights:** Pseudo-simulation achieves a strong correlation with traditional, computationally expensive closed-loop simulations while requiring 6x less compute. Unlike traditional closed-loop simulation, pseudo-simulation is neither sequential nor interactive, enabling the open-loop computation of all evaluation metrics in our leaderboard. It served as the primary evaluation framework for the <a href="https://opendrivelab.com/challenge2025/#navsim-e2e-driving">AGC2025 NAVSIM End-to-End Driving Challenge</a>.
 
 ![image](https://github.com/user-attachments/assets/5966e9ca-5fcb-4cad-a686-eb8ef2bf943e)
 
@@ -70,9 +69,8 @@ The main branch contains the code for NAVSIM v2, used in the 2025 NAVSIM challen
 <p align="right">(<a href="#top">back to top</a>)</p>
 
 ## Changelog <a name="changelog"></a>
-- **`[2025/09/29]`** Bug fix
+- **`[2025/09/29]`** Bugfix
   - Fixed a bug in metric filtering where `"multiplicative_metrics_prod"` and `"weighted_metrics"` were not correctly excluded by the human filter (see [Issue #151](https://github.com/autonomousvision/navsim/issues/151#issue-3379282167)).
-
 - **`[2025/07/16]`** **[[ICCV] Hugging Face Warmup leaderboard](https://huggingface.co/spaces/AGC2025/e2e-driving-warmup-iccv)**   release 
   - This release introduces a **registration system**:  
     - After logging in with your Hugging Face account, click Register and fill in your team information  
