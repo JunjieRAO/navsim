@@ -80,6 +80,8 @@ cd $NAVSIM_DEVKIT_ROOT/scripts/evaluation/
 
 By default, this will generate an evaluation csv for a simple constant velocity [planning baseline](https://github.com/autonomousvision/navsim/blob/main/docs/agents.md#output). You can modify the script to evaluate your own planning agent.
 
+Scoring uses tasks of at most 64 scenes per log by default. Set `max_scenarios_per_task=128` when running `run_pdm_score.py` to reduce per-task model initialization overhead, or use a smaller value to balance uneven logs more finely. This setting does not change the scenes being scored or the final aggregation.
+
 For instance, you can add a new config for your agent under `$NAVSIM_DEVKIT_ROOT/navsim/navsim/planning/script/config/common/agent/my_new_agent.yaml`.
 Then, running your own agent is as simple as adding an override `agent=my_new_agent` to the script.
 You can find an example in `run_human_agent_pdm_score_evaluation.sh`

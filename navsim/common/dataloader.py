@@ -3,11 +3,11 @@ from __future__ import annotations
 import lzma
 import pickle
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 
-from navsim.common.dataclasses import AgentInput, Scene, SceneFilter, SensorConfig
+from navsim.common.dataclasses import AgentInput, Scene, SceneFilter, SceneMetadata, SensorConfig
 from navsim.planning.metric_caching.metric_cache import MetricCache
 
 FrameList = List[Dict[str, Any]]
@@ -77,32 +77,33 @@ def filter_synthetic_scenes(
     data_path: Path, scene_filter: SceneFilter, stage1_scenes_final_frames_tokens: List[str]
 ) -> Dict[str, Tuple[Path, str]]:
     # Load all the synthetic scenes that belong to the original scenes already loaded
-    loaded_scenes: Dict[str, Tuple[Path, str, int]] = {}
+    loaded_scenes: Dict[str, Tuple[Path, str]] = {}
     synthetic_scenes_paths = list(data_path.iterdir())
 
     filter_logs = scene_filter.log_names is not None
     filter_tokens = scene_filter.synthetic_scene_tokens is not None
 
     for scene_path in tqdm(synthetic_scenes_paths, desc="Loading synthetic scenes"):
-        synthetic_scene = Scene.load_from_disk(scene_path, None, None)
+        with scene_path.open("rb") as scene_file:
+            scene_metadata = SceneMetadata(**pickle.load(scene_file)["scene_metadata"])
 
         # if a token is requested specifically, we load it even if it is not related to the original scenes loaded
-        if filter_tokens and synthetic_scene.scene_metadata.initial_token not in scene_filter.synthetic_scene_tokens:
+        if filter_tokens and scene_metadata.initial_token not in scene_filter.synthetic_scene_tokens:
             continue
 
         # filter by log names
-        log_name = synthetic_scene.scene_metadata.log_name
+        log_name = scene_metadata.log_name
         if filter_logs and log_name not in scene_filter.log_names:
             continue
 
         # if we don't filter for tokens explicitly, we load only the synthetic scenes required to run a second stage for the original scenes loaded
         if (
             not filter_tokens
-            and synthetic_scene.scene_metadata.corresponding_original_scene not in stage1_scenes_final_frames_tokens
+            and scene_metadata.corresponding_original_scene not in stage1_scenes_final_frames_tokens
         ):
             continue
 
-        loaded_scenes.update({synthetic_scene.scene_metadata.initial_token: [scene_path, log_name]})
+        loaded_scenes[scene_metadata.initial_token] = (scene_path, log_name)
 
     return loaded_scenes
 
@@ -118,6 +119,8 @@ class SceneLoader:
         synthetic_sensor_path: Path = None,
         synthetic_scenes_path: Path = None,
         sensor_config: SensorConfig = SensorConfig.build_no_sensors(),
+        synthetic_scene_index: Optional[Dict[str, Tuple[Path, str]]] = None,
+        original_scene_index: Optional[Dict[str, FrameList]] = None,
     ):
         """
         Initializes the scene data loader.
@@ -128,21 +131,27 @@ class SceneLoader:
         :param sensor_config: dataclass for sensor loading specification, defaults to no sensors
         """
 
-        self.scene_frames_dicts, stage1_scenes_final_frames_tokens = filter_scenes(data_path, scene_filter)
+        if original_scene_index is None:
+            self.scene_frames_dicts, stage1_scenes_final_frames_tokens = filter_scenes(data_path, scene_filter)
+        else:
+            self.scene_frames_dicts = original_scene_index
+            stage1_scenes_final_frames_tokens = [frames[-1]["token"] for frames in original_scene_index.values()]
         self._synthetic_sensor_path = synthetic_sensor_path
         self._original_sensor_path = original_sensor_path
         self._scene_filter = scene_filter
         self._sensor_config = sensor_config
 
         if scene_filter.include_synthetic_scenes:
-            assert (
-                synthetic_scenes_path is not None
-            ), "Synthetic scenes path cannot be None, when synthetic scenes_filter.include_synthetic_scenes is set to True."
-            self.synthetic_scenes = filter_synthetic_scenes(
-                data_path=synthetic_scenes_path,
-                scene_filter=scene_filter,
-                stage1_scenes_final_frames_tokens=stage1_scenes_final_frames_tokens,
-            )
+            if synthetic_scene_index is None:
+                assert (
+                    synthetic_scenes_path is not None
+                ), "Synthetic scenes path cannot be None, when synthetic scenes_filter.include_synthetic_scenes is set to True."
+                synthetic_scene_index = filter_synthetic_scenes(
+                    data_path=synthetic_scenes_path,
+                    scene_filter=scene_filter,
+                    stage1_scenes_final_frames_tokens=stage1_scenes_final_frames_tokens,
+                )
+            self.synthetic_scenes = synthetic_scene_index
             self.synthetic_scenes_tokens = set(self.synthetic_scenes.keys())
         else:
             self.synthetic_scenes = {}
@@ -281,11 +290,12 @@ class SceneLoader:
             else:
                 tokens_per_logs.update({log_name: [token]})
 
-        for scene_path, log_name in self.synthetic_scenes.values():
+        for initial_token, scene_info in self.synthetic_scenes.items():
+            log_name = scene_info[1]
             if tokens_per_logs.get(log_name):
-                tokens_per_logs[log_name].append(scene_path.stem)
+                tokens_per_logs[log_name].append(initial_token)
             else:
-                tokens_per_logs.update({log_name: [scene_path.stem]})
+                tokens_per_logs.update({log_name: [initial_token]})
 
         return tokens_per_logs
 

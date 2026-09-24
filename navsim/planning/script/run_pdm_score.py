@@ -5,25 +5,27 @@ import uuid
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple
 
 import hydra
 import numpy as np
 import pandas as pd
+import torch
 from hydra.utils import instantiate
 from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.geometry.convert import relative_to_absolute_poses
 from nuplan.planning.script.builders.logging_builder import build_logger
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
-from nuplan.planning.utils.multithreading.worker_utils import worker_map
+from nuplan.planning.utils.multithreading.worker_pool import Task
 from omegaconf import DictConfig
 
 from navsim.agents.abstract_agent import AbstractAgent
-from navsim.common.dataclasses import PDMResults, SensorConfig
+from navsim.common.dataclasses import PDMResults, SensorConfig, Trajectory
 from navsim.common.dataloader import MetricCacheLoader, SceneFilter, SceneLoader
 from navsim.common.enums import SceneFrameType
 from navsim.evaluate.pdm_score import pdm_score
 from navsim.planning.script.builders.worker_pool_builder import build_worker
+from navsim.planning.script.gpu_inference import predict_trajectories, predict_trajectories_multi_gpu
 from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorer
 from navsim.planning.simulation.planner.pdm_planner.scoring.scene_aggregator import SceneAggregator
 from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator import PDMSimulator
@@ -36,7 +38,7 @@ CONFIG_PATH = "config/pdm_scoring"
 CONFIG_NAME = "default_run_pdm_score"
 
 
-def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[pd.DataFrame]:
+def run_pdm_score(args: List[Dict[str, Any]]) -> List[pd.DataFrame]:
     """
     Helper function to run PDMS evaluation in.
     :param args: input arguments
@@ -48,14 +50,21 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
     log_names = [a["log_file"] for a in args]
     tokens = [t for a in args for t in a["tokens"]]
     cfg: DictConfig = args[0]["cfg"]
+    precomputed_trajectories = (
+        {token: trajectory for arg in args for token, trajectory in arg["model_trajectories"].items()}
+        if "model_trajectories" in args[0]
+        else None
+    )
 
     simulator: PDMSimulator = instantiate(cfg.simulator)
     scorer: PDMScorer = instantiate(cfg.scorer)
     assert (
         simulator.proposal_sampling == scorer.proposal_sampling
     ), "Simulator and scorer proposal sampling has to be identical"
-    agent: AbstractAgent = instantiate(cfg.agent)
-    agent.initialize()
+    agent = None
+    if precomputed_trajectories is None:
+        agent = instantiate(cfg.agent)
+        agent.initialize()
 
     metric_cache_loader = MetricCacheLoader(Path(cfg.metric_cache_path))
     scene_filter: SceneFilter = instantiate(cfg.train_test_split.scene_filter)
@@ -67,8 +76,18 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
         data_path=Path(cfg.navsim_log_path),
         synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
         scene_filter=scene_filter,
-        sensor_config=agent.get_sensor_config(),
+        sensor_config=agent.get_sensor_config() if agent is not None else SensorConfig.build_no_sensors(),
+        synthetic_scene_index={token: scene for arg in args for token, scene in arg["synthetic_scenes"].items()},
+        original_scene_index={token: frames for arg in args for token, frames in arg["original_scenes"].items()},
     )
+
+    def trajectory_for_token(token: str) -> Trajectory:
+        if precomputed_trajectories is not None:
+            return precomputed_trajectories[token]
+        agent_input = scene_loader.get_agent_input_from_token(token)
+        if agent.requires_scene:
+            return agent.compute_trajectory(agent_input, scene_loader.get_scene_from_token(token))
+        return agent.compute_trajectory(agent_input)
 
     pdm_results: List[pd.DataFrame] = []
 
@@ -87,12 +106,7 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
         )
         try:
             metric_cache = metric_cache_loader.get_from_token(token)
-            agent_input = scene_loader.get_agent_input_from_token(token)
-            if agent.requires_scene:
-                scene = scene_loader.get_scene_from_token(token)
-                trajectory = agent.compute_trajectory(agent_input, scene)
-            else:
-                trajectory = agent.compute_trajectory(agent_input)
+            trajectory = trajectory_for_token(token)
 
             score_row_stage_one, ego_simulated_states = pdm_score(
                 metric_cache=metric_cache,
@@ -141,12 +155,7 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
         )
         try:
             metric_cache = metric_cache_loader.get_from_token(token)
-            agent_input = scene_loader.get_agent_input_from_token(token)
-            if agent.requires_scene:
-                scene = scene_loader.get_scene_from_token(token)
-                trajectory = agent.compute_trajectory(agent_input, scene)
-            else:
-                trajectory = agent.compute_trajectory(agent_input)
+            trajectory = trajectory_for_token(token)
 
             score_row_stage_two, ego_simulated_states = pdm_score(
                 metric_cache=metric_cache,
@@ -322,6 +331,38 @@ def create_scene_aggregators(
     return full_score_df
 
 
+def build_pdm_score_tasks(
+    cfg: DictConfig, scene_loader: SceneLoader, tokens_to_evaluate: List[str], max_scenarios_per_task: int
+) -> List[Dict[str, Any]]:
+    if max_scenarios_per_task < 1:
+        raise ValueError("max_scenarios_per_task must be positive")
+
+    available_tokens = set(tokens_to_evaluate)
+    tasks = []
+    for log_file, log_tokens in scene_loader.get_tokens_list_per_log().items():
+        tokens = [token for token in log_tokens if token in available_tokens]
+        for start in range(0, len(tokens), max_scenarios_per_task):
+            selected_tokens = tokens[start : start + max_scenarios_per_task]
+            tasks.append(
+                {
+                    "cfg": cfg,
+                    "log_file": log_file,
+                    "tokens": selected_tokens,
+                    "synthetic_scenes": {
+                        token: scene_loader.synthetic_scenes[token]
+                        for token in selected_tokens
+                        if token in scene_loader.synthetic_scenes
+                    },
+                    "original_scenes": {
+                        token: scene_loader.scene_frames_dicts[token]
+                        for token in selected_tokens
+                        if token in scene_loader.scene_frames_dicts
+                    },
+                }
+            )
+    return sorted(tasks, key=lambda task: len(task["tokens"]), reverse=True)
+
+
 @hydra.main(config_path=CONFIG_PATH, config_name=CONFIG_NAME, version_base=None)
 def main(cfg: DictConfig) -> None:
     """
@@ -330,7 +371,13 @@ def main(cfg: DictConfig) -> None:
     """
 
     build_logger(cfg)
-    worker = build_worker(cfg)
+    if cfg.gpu_inference and (torch.device(cfg.gpu_device).type != "cuda" or not torch.cuda.is_available()):
+        raise RuntimeError("GPU inference requires an available CUDA device")
+    if cfg.gpu_inference and (
+        cfg.gpu_num_devices < 1
+        or (torch.device(cfg.gpu_device).index or 0) + cfg.gpu_num_devices > torch.cuda.device_count()
+    ):
+        raise RuntimeError("GPU inference requires the requested number of visible CUDA devices")
 
     # Extract scenes based on scene-loader to know which tokens to distribute across workers
     # TODO: infer the tokens per log from metadata, to not have to load metric cache and scenes here
@@ -352,15 +399,45 @@ def main(cfg: DictConfig) -> None:
     if num_unused_metric_cache_tokens > 0:
         logger.warning(f"Unused metric cache for {num_unused_metric_cache_tokens} tokens. Skipping these tokens.")
     logger.info(f"Starting pdm scoring of {len(tokens_to_evaluate)} scenarios...")
-    data_points = [
-        {
-            "cfg": cfg,
-            "log_file": log_file,
-            "tokens": tokens_list,
-        }
-        for log_file, tokens_list in scene_loader.get_tokens_list_per_log().items()
+    data_points = build_pdm_score_tasks(cfg, scene_loader, tokens_to_evaluate, cfg.max_scenarios_per_task)
+    if cfg.gpu_inference:
+        if cfg.gpu_num_devices > 1:
+            trajectories = predict_trajectories_multi_gpu(
+                cfg, scene_loader, tokens_to_evaluate, torch.device(cfg.gpu_device), cfg.gpu_num_devices
+            )
+        else:
+            agent: AbstractAgent = instantiate(cfg.agent)
+            agent.initialize()
+            inference_scene_loader = SceneLoader(
+                synthetic_sensor_path=Path(cfg.synthetic_sensor_path),
+                original_sensor_path=Path(cfg.original_sensor_path),
+                data_path=Path(cfg.navsim_log_path),
+                synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
+                scene_filter=instantiate(cfg.train_test_split.scene_filter),
+                sensor_config=agent.get_sensor_config(),
+                synthetic_scene_index=scene_loader.synthetic_scenes,
+                original_scene_index=scene_loader.scene_frames_dicts,
+            )
+            trajectories = predict_trajectories(
+                agent,
+                inference_scene_loader,
+                tokens_to_evaluate,
+                torch.device(cfg.gpu_device),
+                cfg.gpu_batch_size,
+                cfg.gpu_num_workers,
+            )
+            del agent
+            torch.cuda.empty_cache()
+        if set(trajectories) != set(tokens_to_evaluate):
+            raise RuntimeError("GPU predictions do not cover all evaluation scenes")
+        for data_point in data_points:
+            data_point["model_trajectories"] = {token: trajectories[token] for token in data_point["tokens"]}
+
+    worker = build_worker(cfg)
+    logger.info(f"Dispatching {len(data_points)} evaluation tasks...")
+    score_rows: List[pd.DataFrame] = [
+        row for task_rows in worker.map(Task(fn=run_pdm_score), [[point] for point in data_points]) for row in task_rows
     ]
-    score_rows: List[pd.DataFrame] = worker_map(worker, run_pdm_score, data_points)
 
     pdm_score_df = pd.concat(score_rows)
 

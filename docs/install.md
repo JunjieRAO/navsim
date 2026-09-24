@@ -103,3 +103,60 @@ conda env create --name navsim -f environment.yml
 conda activate navsim
 pip install -e .
 ```
+
+### NAVSIM-v2 GPU evaluation on H20 (Python 3.12)
+
+The `environment.yml` above keeps the original Python 3.9 setup. For the H20 GPU
+evaluation, create a separate environment from the root of this repository:
+
+```bash
+conda create -n nav-v2 -c conda-forge python=3.12.13 pip -y
+conda activate nav-v2
+python -m pip install --upgrade pip
+python -m pip install 'torch==2.10.0+cu128' 'torchvision==0.25.0+cu128' \
+   --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+python -m pip check
+```
+
+The requirements select Python 3.12-compatible versions automatically. Install
+PyTorch first: the CUDA 12.8 wheels are hosted on the PyTorch index, not the
+default package index. Avoid using `conda env create -f environment.yml` for
+`nav-v2`, since that file installs Python 3.9.
+
+Check the interpreter, CUDA kernel execution, and local evaluation imports:
+
+```bash
+python - <<'PY'
+import sys
+import torch
+import torchvision
+from navsim.planning.script.gpu_inference import predict_trajectories
+from navsim.planning.script.run_pdm_score import run_pdm_score
+
+assert sys.version_info[:3] == (3, 12, 13)
+assert torch.__version__ == '2.10.0+cu128'
+assert torch.version.cuda == '12.8'
+assert torchvision.__version__ == '0.25.0+cu128'
+assert torch.cuda.is_available()
+print(torch.cuda.get_device_name(0), (torch.ones(2, device='cuda:0') + 1).cpu().tolist())
+PY
+```
+
+The GPU evaluation launcher uses `nav-v2` by default; the CPU launcher keeps its
+original Python 3.9 interpreter. Once the dataset and metric cache are ready,
+run the complete GPU evaluation from the repository root with:
+
+```bash
+scripts/evaluation/run_drivor_nav2_gpu_nohup.sh
+```
+
+The launcher predicts on four visible GPUs (`cuda:0` through `cuda:3`), with a
+batch size of four per GPU. The resulting trajectories are scored by the existing
+Ray CPU workers. To run on one GPU instead, add `gpu_num_devices=1` to the command.
+`gpu_device` selects the first visible device, and `gpu_num_devices` selects how
+many consecutive devices to use; `CUDA_VISIBLE_DEVICES` can remap GPU indices.
+
+Set `PYTHON_BIN` to override the GPU interpreter when the environment is
+installed in a different location.
