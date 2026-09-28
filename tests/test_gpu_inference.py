@@ -31,6 +31,25 @@ class PredictionAgent(torch.nn.Module):
 
 
 class TestGPUInference(TestCase):
+    def test_exports_all_proposals_and_checks_baseline(self):
+        agent = PredictionAgent()
+        scene_loader = SimpleNamespace(get_agent_input_from_token=lambda token: int(token))
+
+        def forward(features):
+            trajectory = features["features"]
+            proposals = torch.stack([trajectory + 1, trajectory], dim=1)
+            return {"trajectory": trajectory, "proposals": proposals, "pdm_score": torch.tensor([[0., 1.]])}
+
+        with patch.object(agent, "forward", side_effect=forward):
+            predictions = predict_trajectories(agent, scene_loader, ["1"], torch.device("cpu"), 1, return_proposals=True)
+        self.assertEqual(predictions["1"]["proposals"].shape, (2, 2, 3))
+        np.testing.assert_equal(predictions["1"]["scores"], [0, 1])
+
+        output = forward({"features": torch.zeros((1, 2, 3))})
+        output["trajectory"] = torch.ones((1, 2, 3))
+        with patch.object(agent, "forward", return_value=output), self.assertRaises(ValueError):
+            predict_trajectories(agent, scene_loader, ["1"], torch.device("cpu"), 1, return_proposals=True)
+
     def test_batches_features_and_maps_predictions_by_token(self):
         agent = PredictionAgent()
         scene_loader = type("SceneLoader", (), {"get_agent_input_from_token": lambda self, token: int(token)})()

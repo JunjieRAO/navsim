@@ -40,6 +40,7 @@ def predict_trajectories(
     device: torch.device,
     batch_size: int,
     num_workers: int = 0,
+    return_proposals: bool = False,
 ) -> Dict[str, Trajectory]:
     if batch_size < 1 or num_workers < 0:
         raise ValueError("GPU prediction batch size must be positive and data workers must be non-negative")
@@ -59,7 +60,21 @@ def predict_trajectories(
     with torch.inference_mode():
         for batch_tokens, batch_features in tqdm(dataloader, desc="Predicting trajectories"):
             features = {key: value.to(device, non_blocking=True) for key, value in batch_features.items()}
-            poses = agent.forward(features)["trajectory"].detach().cpu().numpy()
+            output = agent.forward(features)
+            if return_proposals:
+                proposals = output["proposals"].detach().cpu()
+                scores = output["pdm_score"].detach().cpu()
+                selected = proposals[torch.arange(len(batch_tokens)), scores.argmax(dim=1)]
+                if not torch.equal(selected, output["trajectory"].detach().cpu()):
+                    raise ValueError("Proposal score argmax does not reproduce the model trajectory")
+                for index, token in enumerate(batch_tokens):
+                    trajectories[token] = {
+                        "proposals": proposals[index].numpy(),
+                        "scores": scores[index].numpy(),
+                        "sampling": agent._trajectory_sampling,
+                    }
+                continue
+            poses = output["trajectory"].detach().cpu().numpy()
             for token, trajectory_poses in zip(batch_tokens, poses):
                 trajectories[token] = Trajectory(trajectory_poses, agent._trajectory_sampling)
 
@@ -87,7 +102,10 @@ def _predict_on_gpu(
         synthetic_scene_index=synthetic_scenes,
         original_scene_index=original_scenes,
     )
-    return predict_trajectories(agent, scene_loader, tokens, device, cfg.gpu_batch_size, cfg.gpu_num_workers)
+    return predict_trajectories(
+        agent, scene_loader, tokens, device, cfg.gpu_batch_size, cfg.gpu_num_workers,
+        return_proposals=bool(cfg.get("oracle_gt", {}).get("enabled", False)),
+    )
 
 
 def predict_trajectories_multi_gpu(

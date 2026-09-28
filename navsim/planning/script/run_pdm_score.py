@@ -399,6 +399,11 @@ def main(cfg: DictConfig) -> None:
     if num_unused_metric_cache_tokens > 0:
         logger.warning(f"Unused metric cache for {num_unused_metric_cache_tokens} tokens. Skipping these tokens.")
     logger.info(f"Starting pdm scoring of {len(tokens_to_evaluate)} scenarios...")
+    if cfg.get("oracle_gt", {}).get("enabled", False):
+        from navsim.planning.script.oracle_gt_sweep import run_oracle_gt_sweep
+
+        run_oracle_gt_sweep(cfg, scene_loader, tokens_to_evaluate)
+        return
     data_points = build_pdm_score_tasks(cfg, scene_loader, tokens_to_evaluate, cfg.max_scenarios_per_task)
     if cfg.gpu_inference:
         if cfg.gpu_num_devices > 1:
