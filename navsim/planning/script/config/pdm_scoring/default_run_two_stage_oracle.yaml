@@ -22,6 +22,7 @@ gpu_batch_size: 4
 gpu_num_workers: 0
 oracle_workers: 4
 oracle_max_mappings: 0
+oracle_ec_mode: none
 oracle_sigma_squared: 0.1
 oracle_seed: 0
 

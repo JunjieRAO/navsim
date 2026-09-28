@@ -1,5 +1,5 @@
 from copy import copy, deepcopy
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -8,12 +8,13 @@ from nuplan.common.geometry.convert import relative_to_absolute_poses
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 
 from navsim.common.dataclasses import Trajectory
-from navsim.evaluate.pdm_score import pdm_score
+from navsim.evaluate.pdm_score import get_trajectory_as_array, pdm_score, transform_trajectory
 from navsim.planning.metric_caching.metric_cache import MetricCache
+from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_comfort_metrics import ego_is_two_frame_extended_comfort
 from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorer
 from navsim.planning.simulation.planner.pdm_planner.scoring.scene_aggregator import SceneAggregator
 from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator import PDMSimulator
-from navsim.planning.simulation.planner.pdm_planner.utils.pdm_enums import WeightedMetricIndex
+from navsim.planning.simulation.planner.pdm_planner.utils.pdm_enums import StateIndex, WeightedMetricIndex
 from navsim.traffic_agents_policies.abstract_traffic_agents_policy import AbstractTrafficAgentsPolicy
 
 
@@ -49,6 +50,69 @@ def score_without_extended_comfort(result: pd.DataFrame) -> float:
     return float(multiplier * np.dot(values[mask], weights[mask]) / weights[mask].sum())
 
 
+def score_with_extended_comfort(result: pd.DataFrame, extended_comfort: float) -> float:
+    if len(result) != 1 or not np.isfinite(extended_comfort):
+        raise ValueError("Expected one candidate and a finite extended comfort score")
+
+    row = result.iloc[0]
+    values = np.asarray(row["weighted_metrics"], dtype=np.float64).copy()
+    weights = np.asarray(row["weighted_metrics_array"], dtype=np.float64)
+    if values.shape != (len(WeightedMetricIndex),) or weights.shape != values.shape:
+        raise ValueError("Unexpected weighted metric shape")
+    values[WeightedMetricIndex.TWO_FRAME_EXTENDED_COMFORT] = extended_comfort
+    multiplier = float(row["multiplicative_metrics_prod"])
+    if (not np.isfinite(multiplier) or not np.isfinite(values).all() or not np.isfinite(weights).all()
+            or (weights < 0).any() or weights.sum() <= 0):
+        raise ValueError("Invalid evaluator metrics")
+    return float(multiplier * np.dot(values, weights) / weights.sum())
+
+
+def two_frame_extended_comfort(
+    current_states: np.ndarray,
+    previous_states: np.ndarray,
+    current_start_time: float,
+    previous_start_time: float,
+    proposal_sampling: TrajectorySampling,
+) -> float:
+    expected_shape = (proposal_sampling.num_poses + 1, StateIndex.size())
+    interval_length = proposal_sampling.interval_length
+    observation_interval = current_start_time - previous_start_time
+    if (current_states.shape != expected_shape or previous_states.shape != expected_shape
+            or not np.isfinite(current_states).all() or not np.isfinite(previous_states).all()
+            or not 0 < observation_interval < 0.55):
+        raise ValueError("Invalid two-frame states or observation interval")
+
+    overlap_start = round(observation_interval / interval_length)
+    if not 0 < overlap_start < len(current_states) - 1:
+        raise ValueError("Two-frame trajectories do not overlap")
+    current_overlap = current_states[:-overlap_start]
+    previous_overlap = previous_states[overlap_start:]
+    time_points = np.arange(len(current_overlap)) * interval_length
+    result = float(ego_is_two_frame_extended_comfort(
+        current_overlap[None, :], previous_overlap[None, :], time_points,
+    )[0])
+    if not np.isfinite(result):
+        raise ValueError("Non-finite two-frame extended comfort")
+    return result
+
+
+def simulate_fixed_history(
+    metric_cache: MetricCache,
+    selected_trajectory: Trajectory,
+    simulator: PDMSimulator,
+) -> np.ndarray:
+    initial_ego_state = metric_cache.ego_state
+    trajectory = transform_trajectory(selected_trajectory, initial_ego_state)
+    states = get_trajectory_as_array(
+        trajectory, simulator.proposal_sampling, initial_ego_state.time_point,
+    )
+    simulated = simulator.simulate_proposals(states[None, ...], initial_ego_state)[0]
+    expected_shape = (simulator.proposal_sampling.num_poses + 1, StateIndex.size())
+    if simulated.shape != expected_shape or not np.isfinite(simulated).all():
+        raise ValueError("Invalid simulated fixed-history trajectory")
+    return simulated
+
+
 def evaluate_scene_proposals(
     metric_cache: MetricCache,
     proposals: np.ndarray,
@@ -57,16 +121,60 @@ def evaluate_scene_proposals(
     scorer: PDMScorer,
     traffic_agents_policy: AbstractTrafficAgentsPolicy,
 ) -> Tuple[np.ndarray, List[Dict[str, float]]]:
+    scores = np.empty(64, dtype=np.float64)
+    metrics: List[Dict[str, float]] = []
+    for proposal_index, (result, _, metric_values) in enumerate(_candidate_results(
+        metric_cache, proposals, model_sampling, simulator, scorer, traffic_agents_policy,
+    )):
+        scores[proposal_index] = score_without_extended_comfort(result)
+        metrics.append(metric_values)
+    return scores, metrics
+
+
+def evaluate_scene_proposals_with_history(
+    metric_cache: MetricCache,
+    proposals: np.ndarray,
+    previous_states: np.ndarray,
+    previous_start_time: float,
+    model_sampling: TrajectorySampling,
+    simulator: PDMSimulator,
+    scorer: PDMScorer,
+    traffic_agents_policy: AbstractTrafficAgentsPolicy,
+) -> Tuple[np.ndarray, List[Dict[str, float]], np.ndarray, np.ndarray]:
+    scores = np.empty(64, dtype=np.float64)
+    fixed_scores = np.empty(64, dtype=np.float64)
+    comfort_scores = np.empty(64, dtype=np.float64)
+    metrics: List[Dict[str, float]] = []
+    for proposal_index, (result, simulated_states, metric_values) in enumerate(_candidate_results(
+        metric_cache, proposals, model_sampling, simulator, scorer, traffic_agents_policy,
+    )):
+        comfort = two_frame_extended_comfort(
+            simulated_states, previous_states, metric_cache.timepoint.time_s,
+            previous_start_time, simulator.proposal_sampling,
+        )
+        scores[proposal_index] = score_without_extended_comfort(result)
+        fixed_scores[proposal_index] = score_with_extended_comfort(result, comfort)
+        comfort_scores[proposal_index] = comfort
+        metrics.append(metric_values)
+    return scores, metrics, fixed_scores, comfort_scores
+
+
+def _candidate_results(
+    metric_cache: MetricCache,
+    proposals: np.ndarray,
+    model_sampling: TrajectorySampling,
+    simulator: PDMSimulator,
+    scorer: PDMScorer,
+    traffic_agents_policy: AbstractTrafficAgentsPolicy,
+) -> Iterable[Tuple[pd.DataFrame, np.ndarray, Dict[str, float]]]:
     expected_shape = (64, model_sampling.num_poses, 3)
     if proposals.shape != expected_shape or not np.isfinite(proposals).all():
         raise ValueError(f"Expected finite scene proposals with shape {expected_shape}, got {proposals.shape}")
 
-    scores = np.empty(64, dtype=np.float64)
-    metrics: List[Dict[str, float]] = []
     for proposal_index, poses in enumerate(proposals):
         candidate_cache = copy(metric_cache)
         candidate_cache.observation = deepcopy(metric_cache.observation)
-        result, _ = pdm_score(
+        result, simulated_states = pdm_score(
             metric_cache=candidate_cache,
             model_trajectory=Trajectory(poses, model_sampling),
             future_sampling=simulator.proposal_sampling,
@@ -74,13 +182,10 @@ def evaluate_scene_proposals(
             scorer=scorer,
             traffic_agents_policy=traffic_agents_policy,
         )
-        scores[proposal_index] = score_without_extended_comfort(result)
         metric_values = {column: float(result.iloc[0][column]) for column in METRIC_COLUMNS}
         if not np.isfinite(list(metric_values.values())).all():
             raise ValueError(f"Non-finite metrics for proposal {proposal_index}")
-        metrics.append(metric_values)
-
-    return scores, metrics
+        yield result, simulated_states, metric_values
 
 
 def proposal_endpoints(proposals: np.ndarray, initial_pose: StateSE2) -> np.ndarray:
@@ -184,3 +289,16 @@ def select_now_mappings(raw_mapping: Sequence, max_mappings: int = 0) -> List[Tu
     if not selected or len({original_token for original_token, _ in selected}) != len(selected):
         raise ValueError("Expected unique nonempty original now scenes")
     return selected
+
+
+def select_history_pairs(raw_mapping: Sequence, max_mappings: int = 0) -> Dict[str, str]:
+    select_now_mappings(raw_mapping, max_mappings)
+    pairs: Dict[str, str] = {}
+    for original_token, previous_token, followup_pairs in raw_mapping[: max_mappings or None]:
+        for now_token, history_token in [(original_token, previous_token), *followup_pairs]:
+            if not history_token or history_token == now_token:
+                raise ValueError(f"Invalid fixed-history scene for {now_token}")
+            if now_token in pairs and pairs[now_token] != history_token:
+                raise ValueError(f"Conflicting fixed-history scenes for {now_token}")
+            pairs[now_token] = history_token
+    return pairs

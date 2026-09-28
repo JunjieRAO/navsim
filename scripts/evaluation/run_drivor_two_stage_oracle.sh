@@ -18,6 +18,21 @@ case "$MODE" in
         ;;
 esac
 
+ORACLE_EC_MODE="${ORACLE_EC_MODE:-none}"
+for override in "$@"; do
+    case "$override" in
+        oracle_ec_mode=*) ORACLE_EC_MODE="${override#oracle_ec_mode=}" ;;
+    esac
+done
+case "$ORACLE_EC_MODE" in
+    none) EXPERIMENT_NAME=drivor_nav2_oracle/woEC ;;
+    fixed_history) EXPERIMENT_NAME=drivor_nav2_oracle/fixedHistoryEC ;;
+    *)
+        printf 'Invalid ORACLE_EC_MODE: %s (use none or fixed_history)\n' "$ORACLE_EC_MODE" >&2
+        exit 2
+        ;;
+esac
+
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/nav-v2/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]]; then
     printf 'Python interpreter not found: %s (set PYTHON_BIN to override)\n' "$PYTHON_BIN" >&2
@@ -35,7 +50,8 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/drivor_two_stage_oracle_${MODE}_$(date +%Y%m%d_%H%M%S)_$$.log"
 
 nohup env PYTHONUNBUFFERED=1 "$PYTHON_BIN" "$NAVSIM_DEVKIT_ROOT/navsim/planning/script/run_two_stage_oracle.py" \
-    experiment_name=drivor_nav2_oracle/woEC \
+    "experiment_name=$EXPERIMENT_NAME" \
+    "oracle_ec_mode=$ORACLE_EC_MODE" \
     "gpu_device=$GPU_DEVICE" \
     "gpu_num_devices=$GPU_NUM_DEVICES" \
     "gpu_batch_size=$GPU_BATCH_SIZE" \
