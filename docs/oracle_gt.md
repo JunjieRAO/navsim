@@ -15,18 +15,20 @@ S = 10 log(p_NC) + 13 log(p_DAC) + 6 log(p_DDC)
 
 Each probability is a sigmoid head output. The score has upper bound
 `log(31) = 3.434` and no finite lower bound. It is not a normalized PDM metric.
-Reranking uses `S - lambda * ADE` directly, without exponentiating or
-per-scene min-max normalization. ADE is mean Euclidean XY displacement in
-meters over the eight future samples at 0.5, 1.0, ..., 4.0 seconds. Heading
+Reranking uses `S - lambda * D` directly, without exponentiating or
+per-scene min-max normalization. `D` is set by `oracle_gt.distance` (default `fde`):
+`ade` is mean Euclidean XY displacement in meters over the eight future samples
+at 0.5, 1.0, ..., 4.0 seconds; `fde` is the XY displacement at 4.0 seconds. Heading
 is excluded. GT and proposals use the current ego rear-axle coordinate frame.
 
 For each scene with GT, let `best` be the original score argmax. Its first
 switching threshold is the minimum of
-`(S_best - S_candidate) / (ADE_best - ADE_candidate)` over closer candidates.
+`(S_best - S_candidate) / (D_best - D_candidate)` over closer candidates.
 The global reference lambda is the median of strictly positive, finite
 thresholds. The default scan multiplies it by
-`[0, 0.03, 0.1, 0.3, 1, 3, 10, 30]`, then adds a separate minimum-ADE control.
-Tied-score zero thresholds and already-minimum-ADE scenes are counted separately.
+`[0, 0.03, 0.1, 0.3, 1, 3, 10, 30]`, then adds a separate minimum-distance control
+(`include_min_distance`).
+Tied-score zero thresholds and already-minimum-distance scenes are counted separately.
 If no positive threshold exists, an explicit lambda grid is required.
 
 ## GT Coverage
@@ -90,16 +92,16 @@ Outputs are stored in the Hydra experiment directory under
 `exp/drivor_nav2_gt_oracle/`:
 
 - `oracle_candidates.npz`: tokens, proposals, raw scores, and cache identity.
-- `oracle_ade.npz`: aligned GT, per-proposal ADE, coverage, and GT sources.
-- `oracle_diagnostics.json`: score/ADE quantiles, scene score spans, switching
-  thresholds, reference lambda, and oracle scope.
-- `lambda_XX_selection.csv` and `min_ade_selection.csv`: selected proposal,
-  baseline index, selected ADE and raw score for each scene.
+- `oracle_<distance>.npz`: aligned GT, per-proposal distance, coverage, and GT sources.
+- `oracle_diagnostics.json`: distance kind, score/distance quantiles, scene score spans,
+  switching thresholds, reference lambda, and oracle scope.
+- `lambda_XX_selection.csv` and `min_<distance>_selection.csv`: selected proposal,
+  baseline index, selected distance and raw score for each scene.
 - `*_scores.csv`, `*_scores.raw.pkl`, `*_scores.pkl`: scene results before and
   after aggregation. Raw results are retained even if coverage validation fails.
-- `oracle_summary.csv`: actual lambda, combined/stage-one/stage-two score,
-  delta versus lambda zero, mean selected ADE, change rates, and valid scene count.
-  It is updated after each completed setting. The minimum-ADE row has no finite lambda.
+- `oracle_summary.csv`: distance kind, actual lambda, combined/stage-one/stage-two score,
+  delta versus lambda zero, mean selected distance, change rates, and valid scene count.
+  It is updated after each completed setting. The minimum-distance row has no finite lambda.
 
 Reusing a candidate cache checks agent config, checkpoint path/size/mtime,
 data paths, and exact tokens. It does not hash sensor data contents; regenerate

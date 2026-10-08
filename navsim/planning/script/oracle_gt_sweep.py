@@ -13,7 +13,7 @@ from navsim.common.dataclasses import Trajectory
 from navsim.common.dataloader import SceneLoader
 from navsim.planning.script.builders.worker_pool_builder import build_worker
 from navsim.planning.script.gpu_inference import predict_trajectories, predict_trajectories_multi_gpu
-from navsim.planning.script.oracle_gt import calibrate_lambda, proposal_ade, select_proposal
+from navsim.planning.script.oracle_gt import calibrate_lambda, proposal_distance, select_proposal
 
 
 logger = logging.getLogger(__name__)
@@ -175,27 +175,28 @@ def run_oracle_gt_sweep(cfg, scene_loader, tokens):
     sampling = instantiate(cfg.agent.trajectory_sampling)
     ground_truth, sources = load_ground_truth(cfg, scene_loader, tokens, sampling)
     proposals, scores = load_or_predict_candidates(cfg, scene_loader, tokens, sampling)
+    kind = cfg.oracle_gt.distance
     has_gt = np.array([token in ground_truth for token in tokens])
-    ade = np.full(scores.shape, np.nan)
+    distance = np.full(scores.shape, np.nan)
     gt_poses = np.full((len(tokens), sampling.num_poses, 3), np.nan)
     for index, token in enumerate(tokens):
         if has_gt[index]:
             gt_poses[index] = ground_truth[token]
-            ade[index] = proposal_ade(proposals[index], gt_poses[index])
-    reference, thresholds = calibrate_lambda(scores[has_gt], ade[has_gt])
+            distance[index] = proposal_distance(proposals[index], gt_poses[index], kind)
+    reference, thresholds = calibrate_lambda(scores[has_gt], distance[has_gt])
     np.savez_compressed(
-        output_dir / "oracle_ade.npz", tokens=np.array(tokens), ade=ade, ground_truth=gt_poses,
+        output_dir / f"oracle_{kind}.npz", tokens=np.array(tokens), distance=distance, ground_truth=gt_poses,
         has_gt=has_gt, gt_sources=np.array([sources.get(token, "missing_keep_baseline") for token in tokens]),
         interval_length=sampling.interval_length,
     )
     diagnostics = {
-        "lambda_reference": reference, "gt_scenes": int(has_gt.sum()), "total_scenes": len(tokens),
+        "distance": kind, "lambda_reference": reference, "gt_scenes": int(has_gt.sum()), "total_scenes": len(tokens),
         "scope": "all_scenes" if has_gt.all() else "partial_oracle_missing_gt_keeps_baseline",
         "zero_switch_thresholds": int((thresholds == 0).sum()),
-        "baseline_already_min_ade": int(np.isinf(thresholds).sum()),
+        "baseline_already_min_distance": int(np.isinf(thresholds).sum()),
         "score_quantiles": np.quantile(scores, [0, .1, .5, .9, 1]).tolist(),
         "scene_score_span_quantiles": np.quantile(np.ptp(scores, axis=1), [0, .1, .5, .9, 1]).tolist(),
-        "ade_quantiles_m": np.quantile(ade[has_gt], [0, .1, .5, .9, 1]).tolist(),
+        "distance_quantiles_m": np.quantile(distance[has_gt], [0, .1, .5, .9, 1]).tolist(),
         "positive_switch_quantiles": np.quantile(thresholds[np.isfinite(thresholds) & (thresholds > 0)], [0, .1, .5, .9, 1]).tolist() if reference is not None else [],
     }
     (output_dir / "oracle_diagnostics.json").write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
@@ -211,32 +212,32 @@ def run_oracle_gt_sweep(cfg, scene_loader, tokens):
     if not all(np.isfinite(value) and value >= 0 for value in strengths):
         raise ValueError("Lambda grid must be finite and nonnegative")
     settings = [(f"lambda_{index:02d}", strength, False) for index, strength in enumerate(strengths)]
-    if cfg.oracle_gt.include_min_ade:
-        settings.append(("min_ade", 0.0, True))
+    if cfg.oracle_gt.include_min_distance:
+        settings.append((f"min_{kind}", 0.0, True))
     tasks = build_pdm_score_tasks(cfg, scene_loader, tokens, cfg.max_scenarios_per_task)
     worker = build_worker(cfg)
     baseline = scores.argmax(axis=1)
     scene_indices = np.arange(len(tokens))
-    previous_ade = ade[scene_indices[has_gt], baseline[has_gt]]
+    previous_distance = distance[scene_indices[has_gt], baseline[has_gt]]
     summaries = []
-    for label, strength, min_ade in settings:
+    for label, strength, min_distance in settings:
         selected = baseline.copy()
         for index in np.flatnonzero(has_gt):
-            selected[index] = select_proposal(scores[index], ade[index], strength, min_ade)
-        selected_ade = ade[scene_indices[has_gt], selected[has_gt]]
-        if (selected_ade > previous_ade + 1e-8).any():
-            raise AssertionError("Selected ADE must not increase with lambda")
-        previous_ade = selected_ade
+            selected[index] = select_proposal(scores[index], distance[index], strength, min_distance)
+        selected_distance = distance[scene_indices[has_gt], selected[has_gt]]
+        if (selected_distance > previous_distance + 1e-8).any():
+            raise AssertionError(f"Selected {kind} must not increase with lambda")
+        previous_distance = selected_distance
         pd.DataFrame({
             "token": tokens, "has_gt": has_gt, "baseline_index": baseline, "selected_index": selected,
-            "selected_ade_m": ade[scene_indices, selected], "selected_log_score": scores[scene_indices, selected],
+            f"selected_{kind}_m": distance[scene_indices, selected], "selected_log_score": scores[scene_indices, selected],
         }).to_csv(output_dir / f"{label}_selection.csv", index=False)
         trajectories = {token: Trajectory(proposals[index, selected[index]], sampling) for index, token in enumerate(tokens)}
-        logger.info("Evaluating %s: lambda=%s, changed=%d/%d", label, strength, int((selected != baseline).sum()), len(tokens))
+        logger.info("Evaluating %s: %s lambda=%s, changed=%d/%d", label, kind, strength, int((selected != baseline).sum()), len(tokens))
         metrics = evaluate_selection(cfg, scene_loader, tasks, worker, tokens, trajectories, output_dir / f"{label}_scores.csv")
         summary = dict(
-            setting=label, lambda_value=None if min_ade else strength, lambda_reference=reference,
-            scope=diagnostics["scope"], gt_scenes=int(has_gt.sum()), mean_selected_ade_m=float(selected_ade.mean()),
+            setting=label, distance=kind, lambda_value=None if min_distance else strength, lambda_reference=reference,
+            scope=diagnostics["scope"], gt_scenes=int(has_gt.sum()), mean_selected_distance_m=float(selected_distance.mean()),
             changed_fraction=float((selected != baseline).mean()),
             changed_fraction_gt=float((selected[has_gt] != baseline[has_gt]).mean()), **metrics,
         )

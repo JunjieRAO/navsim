@@ -29,7 +29,7 @@ class TestOracleGTSweep(TestCase):
             "train_test_split": {"reactive_all_mapping": [["original", "previous", [["synthetic", "synthetic_previous"]]]]},
             "oracle_gt": {
                 "missing_gt": "error", "gt_path": None, "prepare_only": False,
-                "lambdas": [0, 1], "lambda_multipliers": [0, 1], "include_min_ade": True,
+                "lambdas": [0, 1], "lambda_multipliers": [0, 1], "distance": "fde", "include_min_distance": True,
             },
         })
         self.tokens = ["original", "previous", "synthetic", "synthetic_previous"]
@@ -93,7 +93,7 @@ class TestOracleGTSweep(TestCase):
             self.assertEqual(len(summary), 3)
             np.testing.assert_allclose(summary["delta_baseline"], [0, .1, .2])
             np.testing.assert_array_equal(summary["gt_scenes"].to_numpy(), [2, 2, 2])
-            np.testing.assert_allclose(summary["mean_selected_ade_m"], [5, 1, 1])
+            np.testing.assert_allclose(summary["mean_selected_distance_m"], [5, 1, 1])
             self.assertEqual(evaluated[0]["original"], 5)
             self.assertEqual(evaluated[1]["original"], 1)
             self.assertTrue(all(result["synthetic"] == 5 for result in evaluated))
