@@ -1,0 +1,38 @@
+hydra:
+  run:
+    dir: ${v2_root}/hydra/${stage}
+  output_subdir: ${v2_root}/hydra/${stage}/code/hydra
+  searchpath:
+    - pkg://navsim.planning.script.config.common
+  job:
+    chdir: False
+
+defaults:
+  - default_common
+  - default_evaluation
+  - scorer: pdm_scorer
+  - agent: drivoR
+  - _self_
+  - override train_test_split: navtrain
+
+stage: index
+v2_root: ${oc.env:NAVSIM_EXP_ROOT}/drivor_v2/navtrain
+v1_cache_root: null
+max_scenes: 0
+v2_workers: 1
+max_k: 64
+k_values: [16, 32, 64]
+gpu_device: cuda:0
+gpu_num_devices: 1
+gpu_batch_size: 4
+gpu_num_workers: 0
+gpu_inference_chunk_scenes: 1024
+
+scorer:
+  config:
+    human_penalty_filter: false
+
+simulator:
+  _target_: navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator.PDMSimulator
+  _convert_: 'all'
+  proposal_sampling: ${proposal_sampling}

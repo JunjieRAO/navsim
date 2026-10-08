@@ -18,7 +18,8 @@
 
 # exp
 exp
-
+/weights/
+logs
 # data
 dataset
 
