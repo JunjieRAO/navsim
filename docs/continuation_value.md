@@ -49,12 +49,37 @@ bash scripts/evaluation/run_drivor_v2_04_score.sh
 bash scripts/evaluation/run_drivor_v2_05_analyze.sh
 ```
 
-Wait for each command to finish successfully before starting the next. To run
-all five stages in order in the background and print its PID and log path:
+Wait for each command to finish successfully before starting the next. The
+background launcher defaults to the original stage-one scenes in
+`navhard_two_stage`, using the mapping's original `now` tokens and continuous
+original test logs, not synthetic stage-two branches. It writes to
+`exp/drivor_v2/navhard_stage1_top25_full/` and runs all five stages in order:
 
 ```bash
 bash scripts/evaluation/run_drivor_v2_pipeline_nohup.sh
 ```
+
+The checked test logs contain all 225 stage-one tokens; 223 pass the existing
+eight-second continuity checks and two are skipped for discontinuous timestamps.
+The skip reasons are recorded in `index.json`. Test-set values are future-GT
+oracle diagnostics only, not training labels or deployable selection inputs.
+For a one-scene smoke run, use a separate output directory:
+
+```bash
+V2_MAX_SCENES=1 V2_GPU_NUM_DEVICES=1 V2_WORKERS=4 \
+   V2_ROOT="$PWD/exp/drivor_v2/navhard_stage1_top25_smoke" \
+   bash scripts/evaluation/run_drivor_v2_pipeline_nohup.sh
+```
+
+To retain the original navtrain background workflow:
+
+```bash
+V2_SPLIT=navtrain bash scripts/evaluation/run_drivor_v2_pipeline_nohup.sh
+```
+
+The numbered stage scripts still default to navtrain. When resuming an individual
+navhard stage, supply the same resolved split, stage-one token filter, paths and
+output directory as the background run; these are saved in its Hydra config.
 
 The launcher reads `env_drivor_nav2.sh` (including `OPENSCENE_DATA_ROOT`),
 defaults to four GPUs with batch size 16 and eight data workers per GPU,
