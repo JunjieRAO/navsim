@@ -371,6 +371,11 @@ def main(cfg: DictConfig) -> None:
     """
 
     build_logger(cfg)
+    if cfg.get("gt_two_stage", {}).get("enabled", False):
+        from navsim.planning.script.gt_two_stage_experiment import run_gt_two_stage_experiment
+
+        run_gt_two_stage_experiment(cfg)
+        return
     if cfg.gpu_inference and (torch.device(cfg.gpu_device).type != "cuda" or not torch.cuda.is_available()):
         raise RuntimeError("GPU inference requires an available CUDA device")
     if cfg.gpu_inference and (

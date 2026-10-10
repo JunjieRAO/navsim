@@ -22,6 +22,11 @@ gpu_num_devices: 1
 gpu_batch_size: 4
 gpu_num_workers: 0
 
+gt_two_stage:
+  enabled: false
+  candidate_cache_path: null
+  gt_cache_path: null
+
 simulator:
   _target_: navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator.PDMSimulator
   _convert_: 'all'
